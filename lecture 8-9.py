@@ -1,0 +1,209 @@
+import torch
+import wandb
+wandb.login()
+
+import random
+
+# ! At school
+# def run_training_run(epochs, lr):
+#       print(f"Training for {epochs} epochs with learning rate {lr}")
+#       wandb.init(
+#         # Set the project where this run will be logged
+#         project="harvard-cs197", 
+#         entity="lscofano",
+#         # Track hyperparameters and run metadata
+#         config={
+#         "learning_rate": lr,
+#         "epochs": epochs,
+#         })
+
+#       offset = random.random() / 5
+#       print(f"lr: {lr}")
+#       for epoch in range(2, epochs):
+#             # simulating a training run
+#             acc = 1 - 2 ** -epoch - random.random() / epoch - offset
+#             loss = 2 ** -epoch + random.random() / epoch + offset
+#             # show and log best accuracy and loss
+#             print(f"epoch={epoch}, acc={acc}, loss={loss}")
+#             wandb.log({"acc": acc, "loss": loss})
+
+#             # Log a validation run every 10 epochs
+#             if epochs //10 == 0:
+
+#                 with torch.no_grad():
+#                     # simulating a validation run
+#                     val_acc = 1 - 2 ** -epoch - random.random() / epoch - offset
+#                     val_loss = 2 ** -epoch + random.random() / epoch + offset
+#                     print(f"epoch={epoch}, val_acc={val_acc}, val_loss={val_loss}")
+#                     wandb.log({"val_acc": val_acc, "val_loss": val_loss})
+
+#       wandb.finish()
+
+
+# # We are going to run multiple trials with different lr
+# def run_multiple_training_runs(epochs, lrs):
+#     for epoch in epochs:
+#         for lr in lrs:
+#             run_training_run(epoch, lr)
+
+# # Try different values for the learning rate
+# epochs = [100, 120, 140]
+# lrs = [0.1, 0.01, 0.001, 0.0001]
+# run_multiple_training_runs(epochs, lrs)
+
+# ! At home
+import math
+import random
+import torch
+import torch.nn as nn
+import torchvision
+import torchvision.transforms as T
+
+DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def get_dataloader(is_train, batch_size, slice=5):
+    full_dataset = torchvision.datasets.MNIST(
+        root=".",
+        train=is_train,
+        transform=T.ToTensor(),
+        download=True)
+    sub_dataset = torch.utils.data.Subset(
+        full_dataset,
+        indices=range(0, len(full_dataset), slice))
+    loader = torch.utils.data.DataLoader(
+        dataset=sub_dataset,
+        batch_size=batch_size,
+        shuffle=is_train,
+        pin_memory=True,
+        num_workers=2)
+    return loader
+
+
+def get_model(dropout):
+    "A simple model"
+    model = nn.Sequential(
+        nn.Flatten(),
+        nn.Linear(28*28, 256),
+        nn.BatchNorm1d(256),
+        nn.ReLU(),
+        nn.Dropout(dropout),
+        nn.Linear(256, 10)).to(DEVICE)
+    return model
+
+
+def validate_model(
+        model,
+        valid_dl,
+        loss_func,
+        log_images=False,
+        batch_idx=0):
+
+    model.eval()
+    val_loss = 0.
+    with torch.inference_mode():
+        correct = 0
+        for i, (images, labels) in enumerate(valid_dl):
+            images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+            # Forward pass
+            outputs = model(images)
+            val_loss += loss_func(outputs, labels).item() * labels.size(0)
+
+            # Compute accuracy and accumulate
+            _, predicted = torch.max(outputs.data, 1)
+            correct += (predicted == labels).sum().item()
+            # create a wandb Table to log images, lables, and predictions
+            if log_images and i == batch_idx:
+                images = images.cpu()
+                labels = labels.cpu()
+                predicted = predicted.cpu()
+                table = wandb.Table(columns=["Image", "Label", "Predicted"])
+                for i in range(len(images)):
+                    table.add_data(
+                        wandb.Image(images[i]),
+                        labels[i],
+                        predicted[i])
+                wandb.log({"predictions": table})
+
+    return val_loss / len(valid_dl.dataset), correct / len(valid_dl.dataset)
+
+class Config():
+    """Helper to convert a dictionary to a class"""
+    def __init__(
+        self,
+        dict):
+        "A simple config class"
+        self.epochs = dict['epochs']
+        self.batch_size = dict['batch_size']
+        self.lr = dict['lr']
+        self.dropout = dict['dropout']
+
+
+def train():
+    for _ in range(5):
+            # Launch 5 experiments, trying different dropout rates
+        config_dict = {
+            "epochs": 10,
+            "batch_size": 128,
+            "lr": 1e-3,
+            "dropout": random.uniform(0.01, 0.80),
+        }
+        config = Config(config_dict)
+
+        wandb.init(
+        # Set the project where this run will be logged
+        project="harvard-cs197", 
+        entity="lscofano",
+        # Track hyperparameters and run metadata
+        config=config_dict)
+
+        # Get the data
+        train_dl = get_dataloader(
+            is_train=True,
+            batch_size=config.batch_size)
+        valid_dl = get_dataloader(
+            is_train=False,
+            batch_size=2*config.batch_size)
+        n_steps_per_epoch = \
+            math.ceil(len(train_dl.dataset) / config.batch_size)
+        
+        # A simple MLP model
+        model = get_model(config.dropout)
+
+        # Make the loss and optimizer
+        loss_func = nn.CrossEntropyLoss()
+        optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
+
+    # Training
+        example_ct = 0
+        step_ct = 0
+        for epoch in range(config.epochs):
+            model.train()
+            for step, (images, labels) in enumerate(train_dl):
+                images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+                outputs = model(images)
+                train_loss = loss_func(outputs, labels)
+                wandb.log({"train_loss": train_loss})
+                optimizer.zero_grad()
+                train_loss.backward()
+                optimizer.step()
+        
+                example_ct += len(images)
+                step_ct += 1
+
+            val_loss, accuracy = validate_model(
+                model,
+                valid_dl,
+                loss_func,
+                log_images=(epoch == (config.epochs-1)))
+
+            print(f"Train Loss: {train_loss:.3f}, \
+                Valid Loss: {val_loss:3f}, \
+                Accuracy: {accuracy:.2f}")
+            wandb.log({"val_loss": val_loss, "accuracy": accuracy})
+
+
+if __name__ == "__main__":
+    train()
